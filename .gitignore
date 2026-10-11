@@ -1,0 +1,20 @@
+# Local credentials
+.env
+.env.*
+!.env.example
+# Python environment and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+# Runtime logs and private working data
+*.log
+/data/
+/uploads/
+/reports/
+# Editors and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
