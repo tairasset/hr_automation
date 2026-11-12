@@ -424,8 +424,24 @@ def _clean_resume(text: str, max_chars: int = 5000) -> str:
     return text[:max_chars].strip()
 
 
+DEFAULT_SCORING_WEIGHTS = {"experience": 30, "skills": 30, "education": 20, "soft_skills": 20}
+GROQ_MODEL = os.getenv("GROQ_MODEL", "").strip() or "openai/gpt-oss-120b"
+
+
+def normalize_scoring_weights(weights: dict[str, int]) -> dict[str, int]:
+    total = sum(weights.values())
+    if total == 0:
+        return DEFAULT_SCORING_WEIGHTS.copy()
+    quotas = {key: divmod(value * 100, total) for key, value in weights.items()}
+    normalized = {key: quota[0] for key, quota in quotas.items()}
+    remaining = 100 - sum(normalized.values())
+    for key in sorted(quotas, key=lambda key: quotas[key][1], reverse=True)[:remaining]:
+        normalized[key] += 1
+    return normalized
+
+
 def _parse_analysis(raw: str, weights: dict | None = None) -> dict:
-    w = weights or {"experience": 30, "skills": 30, "education": 20, "soft_skills": 20}
+    w = weights or DEFAULT_SCORING_WEIGHTS
     text = _extract_json(raw)
     data = json.loads(text)
     score_fields = ("experience", "skills", "education", "soft_skills")
@@ -456,7 +472,7 @@ def _call_with_backoff(client: Groq, messages: list, temperature: float,
     """Call Groq with exponential backoff on rate-limit errors."""
     delays = [5, 15, 30]
     kwargs: dict = dict(
-        model="llama-3.3-70b-versatile",
+        model=GROQ_MODEL,
         messages=messages,
         temperature=temperature,
         max_tokens=max_tokens,
@@ -481,7 +497,7 @@ class AnalysisUnavailable(RuntimeError):
 
 def analyze_resume(client: Groq, resume_text: str, job_description: str,
                    candidate_name: str, weights: dict | None = None) -> dict:
-    w = weights or {"experience": 30, "skills": 30, "education": 20, "soft_skills": 20}
+    w = weights or DEFAULT_SCORING_WEIGHTS
     cleaned = _clean_resume(resume_text)
     messages = [
         {"role": "system", "content": SYSTEM_JSON},
@@ -507,7 +523,7 @@ def analyze_resume(client: Groq, resume_text: str, job_description: str,
             *messages, {"role": "user", "content": correction},
         ]
         try:
-            raw = _call_with_backoff(client, current_messages, temperature=0.1, max_tokens=2048)
+            raw = _call_with_backoff(client, current_messages, temperature=0.1, max_tokens=2048, json_mode=True)
             return _parse_analysis(raw, w)
         except RuntimeError as exc:
             raise AnalysisUnavailable("Analysis unavailable. Check Groq and try again.") from exc
@@ -755,7 +771,7 @@ def render_jd_section() -> tuple[str, dict]:
         st.rerun()
 
     # Defaults returned when advanced section is collapsed
-    weights = {"experience": 30, "skills": 30, "education": 20, "soft_skills": 20}
+    weights = DEFAULT_SCORING_WEIGHTS.copy()
     edu_level      = "Any"
     field_of_study = ""
     emp_types:  list[str] = []
@@ -861,18 +877,16 @@ def render_jd_section() -> tuple[str, dict]:
         w_skl  = wc2.slider("Tech Skills %", 0, 100, 30, step=5, key="jd_w_skills")
         w_edu  = wc3.slider("Education %",   0, 100, 20, step=5, key="jd_w_edu")
         w_soft = wc4.slider("Soft Skills %", 0, 100, 20, step=5, key="jd_w_soft")
-        total_w = w_exp + w_skl + w_edu + w_soft
-        if total_w != 100:
-            st.warning(f"Weights sum to {total_w}/100 — will be normalized automatically.")
-            if total_w > 0:
-                w_exp  = round(w_exp  * 100 / total_w)
-                w_skl  = round(w_skl  * 100 / total_w)
-                w_edu  = round(w_edu  * 100 / total_w)
-                w_soft = 100 - w_exp - w_skl - w_edu
-        weights = {"experience": w_exp, "skills": w_skl, "education": w_edu, "soft_skills": w_soft}
+        raw_weights = {"experience": w_exp, "skills": w_skl, "education": w_edu, "soft_skills": w_soft}
+        total_w = sum(raw_weights.values())
+        weights = normalize_scoring_weights(raw_weights)
+        if total_w == 0:
+            st.warning("All weights are zero. The default scoring weights are active.")
+        elif total_w != 100:
+            st.warning(f"Weights sum to {total_w}/100 and were normalized to 100.")
         st.info(
-            f"Active weights: Experience {w_exp}% | Skills {w_skl}% "
-            f"| Education {w_edu}% | Soft Skills {w_soft}%"
+            f"Active weights: Experience {weights['experience']}% | Skills {weights['skills']}% "
+            f"| Education {weights['education']}% | Soft Skills {weights['soft_skills']}%"
         )
 
         # Additional notes
@@ -1519,7 +1533,7 @@ def render_detail_page(candidate: dict, saved_jd: str) -> None:
 
 with st.sidebar:
     st.title("📄 Resume Screener")
-    st.markdown("*Powered by Groq · llama-3.3-70b-versatile*")
+    st.markdown(f"*Powered by Groq · {GROQ_MODEL}*")
     st.divider()
     st.markdown("### Score Legend")
     st.markdown("""
@@ -1677,7 +1691,7 @@ if st.session_state["view"] == "rankings" or not st.session_state.get("results")
         client = get_groq_client()
         results: list[dict] = []
         errors: list[str] = []
-        weights = req_dict.get("weights", {"experience": 30, "skills": 30, "education": 20, "soft_skills": 20})
+        weights = req_dict.get("weights", DEFAULT_SCORING_WEIGHTS)
 
         candidates: list[dict] = []
         for f in uploaded_files:

@@ -17,7 +17,7 @@ cd resume_screener
 python -m pip install -r requirements.txt
 ```
 
-Copy `.env.example` to `.env` inside `resume_screener` and set `GROQ_API_KEY`. Start the app:
+Copy `.env.example` to `.env` inside `resume_screener` and set `GROQ_API_KEY`. The default model is `openai/gpt-oss-120b`. Set `GROQ_MODEL` if your Groq project uses a different compatible model. Start the app:
 
 ```sh
 python -m streamlit run app.py
