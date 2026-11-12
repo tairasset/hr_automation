@@ -1,0 +1,11 @@
+Sample Candidate
+
+Summary
+Junior developer who has built Python web tools for student projects.
+
+Projects
+Inventory Tracker - Built a Streamlit dashboard that loads product records from CSV and validates missing values.
+Study Planner - Integrated a calendar API and documented the setup for classmates.
+
+Education
+Undergraduate coursework in computer science.

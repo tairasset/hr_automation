@@ -428,11 +428,14 @@ def _parse_analysis(raw: str, weights: dict | None = None) -> dict:
     w = weights or {"experience": 30, "skills": 30, "education": 20, "soft_skills": 20}
     text = _extract_json(raw)
     data = json.loads(text)
-    data["score"] = max(0, min(100, int(data.get("score", 0))))
-    data["experience_score"]   = max(0, min(w["experience"],  int(data.get("experience_score",   0))))
-    data["skills_score"]       = max(0, min(w["skills"],      int(data.get("skills_score",       0))))
-    data["education_score"]    = max(0, min(w["education"],   int(data.get("education_score",    0))))
-    data["soft_skills_score"]  = max(0, min(w["soft_skills"], int(data.get("soft_skills_score",  0))))
+    score_fields = ("experience", "skills", "education", "soft_skills")
+    for category in score_fields:
+        field = f"{category}_score"
+        value = data[field]
+        if type(value) is not int:
+            raise ValueError(f"{field} must be an integer")
+        data[field] = max(0, min(w[category], value))
+    data["score"] = sum(data[f"{category}_score"] for category in score_fields)
     data["meets_min_experience"] = bool(data.get("meets_min_experience", True))
     data["meets_min_education"]  = bool(data.get("meets_min_education",  True))
     for key in ("strengths", "weaknesses"):
@@ -440,8 +443,8 @@ def _parse_analysis(raw: str, weights: dict | None = None) -> dict:
         while len(lst) < 3:
             lst.append("—")
         data[key] = lst
-    if not data.get("hire_recommendation"):
-        raise ValueError("missing or empty hire_recommendation")
+    if data.get("hire_recommendation") not in ("Strong Hire", "Hire", "Maybe", "No Hire"):
+        raise ValueError("missing or invalid hire_recommendation")
     if not data.get("summary"):
         raise ValueError("missing or empty summary")
     data["weights"] = w
@@ -472,6 +475,10 @@ def _call_with_backoff(client: Groq, messages: list, temperature: float,
     raise RuntimeError("Rate limit persists after retries — please wait a minute and try again.")
 
 
+class AnalysisUnavailable(RuntimeError):
+    pass
+
+
 def analyze_resume(client: Groq, resume_text: str, job_description: str,
                    candidate_name: str, weights: dict | None = None) -> dict:
     w = weights or {"experience": 30, "skills": 30, "education": 20, "soft_skills": 20}
@@ -494,33 +501,20 @@ def analyze_resume(client: Groq, resume_text: str, job_description: str,
         'Start your response with { and end with }.'
     )
 
-    last_exc: Exception | None = None
+    last_error: Exception | None = None
     for attempt in range(3):
+        current_messages = messages if attempt == 0 else [
+            *messages, {"role": "user", "content": correction},
+        ]
         try:
-            raw = _call_with_backoff(client, messages, temperature=0.1, max_tokens=2048)
+            raw = _call_with_backoff(client, current_messages, temperature=0.1, max_tokens=2048)
             return _parse_analysis(raw, w)
-        except Exception as exc:
-            last_exc = exc
-            if attempt < 2:
-                messages = [
-                    {"role": "system", "content": SYSTEM_JSON},
-                    {"role": "user", "content": correction},
-                ]
+        except RuntimeError as exc:
+            raise AnalysisUnavailable("Analysis unavailable. Check Groq and try again.") from exc
+        except (ValueError, TypeError, KeyError) as exc:
+            last_error = exc
 
-    return {
-        "score": 0,
-        "experience_score": 0,
-        "skills_score": 0,
-        "education_score": 0,
-        "soft_skills_score": 0,
-        "meets_min_experience": True,
-        "meets_min_education": True,
-        "strengths": ["Analysis failed", "—", "—"],
-        "weaknesses": ["Analysis failed", "—", "—"],
-        "hire_recommendation": "No Hire",
-        "summary": f"⚠️ Failed after 3 attempts. Last error: {last_exc}",
-        "weights": w,
-    }
+    raise AnalysisUnavailable("Analysis unavailable. Groq returned an incomplete assessment.") from last_error
 
 
 # ── Groq — Interview Questions ────────────────────────────────────────────────
@@ -1547,13 +1541,13 @@ with st.sidebar:
 6. Generate interview questions & export PDF
 """)
 
-    if st.session_state.get("results"):
+    if st.session_state.get("results") or st.session_state.get("analysis_errors"):
         st.divider()
-        n = len(st.session_state["results"])
+        n = len(st.session_state.get("results", []))
         st.markdown(f"**{n} candidate(s) analyzed**")
         if st.button("🔄 New Analysis", use_container_width=True):
             for key in ("results", "questions", "view", "detail_candidate",
-                        "job_description", "stored_files"):
+                        "job_description", "stored_files", "analysis_errors"):
                 st.session_state.pop(key, None)
             st.rerun()
 
@@ -1729,8 +1723,10 @@ if st.session_state["view"] == "rankings" or not st.session_state.get("results")
                     "summary":              analysis["summary"],
                     "resume_text":          resume_text,
                 })
-            except Exception as exc:
-                errors.append(f"{cand['filename']} ({name}): {exc}")
+            except AnalysisUnavailable as exc:
+                errors.append(f"{name}: {exc}")
+            except Exception:
+                errors.append(f"{name}: Could not process the resume file.")
 
             # Rate-limit guard between calls (skip after the last one)
             if idx < total - 1:
@@ -1739,15 +1735,18 @@ if st.session_state["view"] == "rankings" or not st.session_state.get("results")
         progress.progress(1.0, text=f"✅ Done! Analyzed {len(results)}/{total} candidates.")
         status.empty()
 
-        for err in errors:
-            st.warning(f"⚠️ {err}")
-
+        st.session_state["analysis_errors"]  = errors
         st.session_state["results"]          = results
         st.session_state["job_description"]  = jd_text
         st.session_state["req_dict"]         = req_dict
         st.session_state["questions"]        = {}
         st.session_state["view"]             = "rankings"
         st.rerun()
+
+
+if st.session_state["view"] == "rankings":
+    for message in st.session_state.get("analysis_errors", []):
+        st.warning(message)
 
 
 # ── Rankings page ─────────────────────────────────────────────────────────────
